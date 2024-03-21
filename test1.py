@@ -2,7 +2,7 @@ from cryptography.fernet import Fernet
 import os
 
 # Generate a key for encryption and decryption
-MASTER_KEY = Fernet.generate_key()  # Fixed Master Key for client-side encryption
+MASTER_KEY = Fernet.generate_key()  
 
 class Client:
     def __init__(self, server, kms):
