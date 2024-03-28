@@ -28,7 +28,29 @@ class KeyManagementService:
         self.old_mk = None  # Initialize old MK as None
         self.cmk = self.generate_cmk()  # Generate Customer Master Key (CMK)
 
+    def generate_mk(self):
+        # Generate a Master Key (MK)
+        mk = rsa.generate_private_key(
+            public_exponent=65537,
+            key_size=2048,
+            backend=default_backend()
+        )
+        return mk
 
+    def generate_kek(self, mk):
+        # Generate a Key Encryption Key (KEK) using the Master Key
+        kek = PBKDF2HMAC(
+            algorithm=hashes.SHA256(),
+            length=32,
+            salt=os.urandom(16),
+            iterations=100000,
+            backend=default_backend()
+        ).derive(mk.private_bytes(
+            encoding=serialization.Encoding.PEM,
+            format=serialization.PrivateFormat.PKCS8,
+            encryption_algorithm=serialization.NoEncryption()
+        ))
+        return kek
 
     def generate_cmk(self):
         # Generate Customer Master Key (CMK)
@@ -127,7 +149,18 @@ class KeyManagementService:
 kms = KeyManagementService()
 
 
+def generate_dek():
+    return os.urandom(32)  #Generate Data Encryption Key (DEK) - DEK length is 32 bytes for AES-256
 
+
+def encrypt_data(data, dek, kek):
+    cipher = AESGCM(dek)
+    nonce = os.urandom(12) 
+    ciphertext = cipher.encrypt(nonce, data, None)
+    return {
+        'nonce': nonce.hex(),
+        'ciphertext': ciphertext.hex()
+    }
 
 
 def decrypt_data(data, dek, kek):
@@ -224,7 +257,20 @@ def home():
 
 
 @app.route('/download/<filename>', methods=['GET'])
-
+def download_file(filename):
+    file_path = os.path.join(app.config['UPLOAD_FOLDER'], filename)
+    metadata_file_path = file_path + '.metadata'
+    if os.path.exists(metadata_file_path):
+        with open(metadata_file_path, 'r') as metadata_file:
+            file_metadata = json.load(metadata_file)
+            dek = bytes.fromhex(file_metadata['dek'])
+            decrypted_chunks = decrypt_file(metadata_file_path, dek)
+            decrypted_data = b''.join(decrypted_chunks)
+        with open(file_path, 'wb') as f:
+            f.write(decrypted_data)
+        return send_from_directory(app.config['UPLOAD_FOLDER'], filename, as_attachment=True)
+    else:
+        return "File not found."
 
 
 @app.route('/list_files', methods=['GET'])
