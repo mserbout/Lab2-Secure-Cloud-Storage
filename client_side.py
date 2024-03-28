@@ -2,8 +2,13 @@ from cryptography.fernet import Fernet
 import os
 import secrets
 
-  
+
+
+KEY_ROTATION_INTERVAL = 2 # Rotate keys every 10 uploads/downloads
+MASTER_KEY_FILE = "master_key.key"
+PREVIOUS_MASTER_KEY_FILE = "previous_master_key.key"
 PASSWORD = "12345"
+# MK="CvTnMTqI01MFsmiieCqIZ71HOwe4eWmQYiUFfVH8RMQ="
 
 class ModeSelector:
     def select_mode():
@@ -27,6 +32,9 @@ class Client:
         self.server = server
         self.kms = kms
         self.key_hierarchy = {}  
+        self.upload_count = 0
+        self.current_master_key = None
+
 
     def upload(self, filename):
         with open(filename, 'rb') as f:
@@ -34,20 +42,30 @@ class Client:
         
         password = input("Enter password to protect the file: ")
         if password==PASSWORD:   
+            # Rotate master key if upload count reaches rotation interval
+            if self.upload_count % KEY_ROTATION_INTERVAL == 0:
+                self.rotate_master_key()
+
+
             # Request DEK from KMS
             dek = self.kms.request_key(filename)  
             cipher_suite = Fernet(dek)
             encrypted_data = cipher_suite.encrypt(data)
+
             #generate KEK
             kek=self.kms.request_key(dek) 
+
             # Encrypt DEK with KEK
             kek_cipher_suite = Fernet(kek)
             encrypted_dek = kek_cipher_suite.encrypt(dek)
-            #generate MASTER_KEY
-            MK=self.kms.request_key(kek) 
+
+            # #generate MASTER_KEY
+            # MK=self.kms.request_key(kek)            
+            
             #Encrypt KEK with MASTER_KEY
-            MK_cipher_suite = Fernet(MK)
+            MK_cipher_suite = Fernet(self.current_master_key)
             encrypted_kek = MK_cipher_suite.encrypt(kek)
+
             self.key_hierarchy[encrypted_dek] = (encrypted_kek, password)
             # Add file metadata to encrypted data
             metadata = {
@@ -63,16 +81,19 @@ class Client:
             # print(f"encrypted data {encrypted_data} ")
             # print(f"-------------------------------------------------------------------------------------------------------------------")
 
-            print(f"encrypted_dek {encrypted_dek}")
+            # print(f"encrypted_dek {encrypted_dek}")
+            # # print(f"-------------------------------------------------------------------------------------------------------------------")
+
+            # print(f"encrypted_kek{encrypted_kek}")
             # print(f"-------------------------------------------------------------------------------------------------------------------")
-
-            print(f"encrypted_kek{encrypted_kek}")
-            # print(f"-------------------------------------------------------------------------------------------------------------------")
-            print(f"mk {MK}")
+            # print(f"mk {MK}")
 
 
-            self.server.store(filename,encrypted_data_with_metadata,encrypted_kek,MK)
+            self.server.store(filename,encrypted_data_with_metadata,encrypted_kek,self.current_master_key)
             print("File uploaded successfully!")
+            self.upload_count += 1
+            print(self.current_master_key)
+
         else:
                 print("INCORRECT PASSWORD")
 
@@ -108,14 +129,14 @@ class Client:
                 self.kms.secure_delete_key(decrypted_kek)
                 self.kms.secure_delete_key(MK)
 
-                print("---------------------------------")
+                # print("---------------------------------")
 
-                print(decrypted_dek)
+                # print(decrypted_dek)
               
-                print("---------------------------------")
+                # print("---------------------------------")
 
-                print(decrypted_kek)
-                print("---------------------------------")
+                # print(decrypted_kek)
+                # print("---------------------------------")
 
                 print(MK)
 
@@ -152,6 +173,13 @@ class Client:
                 break
             else:
                 print("Invalid choice!")
+
+    def rotate_master_key(self):
+        new_master_key = Fernet.generate_key()
+        with open(MASTER_KEY_FILE, 'wb') as f:
+            f.write(new_master_key)
+
+        self.current_master_key = new_master_key
 
 class Server:
     def __init__(self):
