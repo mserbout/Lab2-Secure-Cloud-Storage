@@ -177,7 +177,7 @@ def home():
         file.save(file_path)
         kms.encrypt_file(file_path)
         
-        return "File has been uploaded and encrypted."
+        return "File has been uploaded and encrypted. If you need to download file, updat windows"
     return render_template('index.html', form=form, files=original_files)
 
 

@@ -2,22 +2,61 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>File Upload</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/index.css') }}">
 </head>
 <body>
-    <h1>Upload File</h1>
-    <form method="POST" enctype="multipart/form-data">
+    <h1>File Uploads</h1>
+
+    <form method='POST' enctype='multipart/form-data' action="{{ url_for('home') }}">
         {{ form.hidden_tag() }}
-        <div>{{ form.file.label }}</div>
-        <div>{{ form.file }}</div>
-        <div>{{ form.submit }}</div>
+        <input type="file" name="file">
+        <input type="submit" value="Upload File">
     </form>
-    <h2>Uploaded Files</h2>
-    <ul>
-        {% for file in files %}
-            <li><a href="/download/{{ file }}">{{ file }}</a></li>
-        {% endfor %}
-    </ul>
+
+    <h2>List of Files</h2>
+    <table>
+        <thead>
+            <tr>
+                <th>Filename</th>
+                <th>Action</th>
+            </tr>
+        </thead>
+        <tbody id="file-list">
+            <!-- File list will be dynamically populated here -->
+            {% for file in files %}
+            <tr>
+                <td>{{ file }}</td>
+                <td><a href="{{ url_for('download', filename=file) }}" class="download-btn">Download</a></td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+
+    <script>
+        // Fetch the list of files from the server
+        fetch('/list')
+            .then(response => response.json())
+            .then(files => {
+                const fileList = document.getElementById('file-list');
+                files.forEach(file => {
+                    const row = document.createElement('tr');
+                    const fileNameCell = document.createElement('td');
+                    fileNameCell.textContent = file;
+                    row.appendChild(fileNameCell);
+                    const actionCell = document.createElement('td');
+                    const downloadLink = document.createElement('a');
+                    downloadLink.href = `/download/${file}`;
+                    downloadLink.textContent = 'Download';
+                    downloadLink.className = 'download-btn';
+                    actionCell.appendChild(downloadLink);
+                    row.appendChild(actionCell);
+                    fileList.appendChild(row);
+                });
+            })
+            .catch(error => console.error('Error fetching file list:', error));
+    </script>
 </body>
 </html>
