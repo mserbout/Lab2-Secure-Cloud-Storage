@@ -1,3 +1,5 @@
+import base64
+from fileinput import filename
 from flask import Flask, render_template, request, send_from_directory
 from flask_wtf import FlaskForm
 from wtforms import FileField, SubmitField
@@ -6,6 +8,10 @@ from cryptography.fernet import Fernet
 import os
 import json
 from wtforms.validators import InputRequired
+import hashlib
+from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+from cryptography.hazmat.backends import default_backend
+from wtforms import SelectField
 
 app = Flask(__name__)
 app.config['SECRET_KEY'] = 'supersecretkey'
@@ -27,9 +33,17 @@ class KMS:
         """
         return Fernet.generate_key()
 
-    def encrypt_file(self, file_path):
+    def encrypt_file(self, file_path, encryption_algorithm):
+        if encryption_algorithm == 'fernet':
+            return self.encrypt_file_with_fernet(file_path)
+        elif encryption_algorithm == 'aes-gcm':
+            return self.encrypt_file_with_aes_gcm(file_path)
+        else:
+            raise ValueError("Invalid encryption algorithm")
+
+    def encrypt_file_with_fernet(self, file_path):
         """
-        Encrypts a file using the Data Encryption Key (DEK) and encrypts the DEK using the KEK.
+        Encrypts a file using the Fernet algorithm.
         """
         CHUNK_SIZE = 1024 * 1024  # 1MB chunk size (adjust as needed)
         filename = os.path.basename(file_path)
@@ -52,25 +66,32 @@ class KMS:
                 kek = self.request_key()
                 kek_cipher_suite = Fernet(kek)
                 encrypted_dek = kek_cipher_suite.encrypt(dek)
+                # Store encrypted dEK for later decryption
+                self.storage[filename] = {'encrypted_kek': encrypted_dek}
 
                 # Generate CMK and encrypt KEK
                 cmk = self.request_key()
                 cmk_cipher_suite = Fernet(cmk)
                 encrypted_kek = cmk_cipher_suite.encrypt(kek)
 
+                # Store encrypted KEK for later decryption
+                self.storage[filename] = {'encrypted_kek': encrypted_kek}
+
+                # Create metadata
                 metadata = {
                     'filename': filename,
                     'chunk_index': chunk_index,
-                    'encrypted_dek': encrypted_dek.decode()  # Convert bytes to string for serialization
+                    'algorithm': 'Fernet',
+                    'key_id': hashlib.sha256(dek).hexdigest()
                 }
 
-                # Encrypt the chunk with the DEK
+                 # Encrypt the chunk with the DEK
                 encrypted_chunk = fernet.encrypt(chunk)
 
                 # Create a dictionary containing the encrypted chunk data and metadata
                 encrypted_data_with_metadata = {
-                    'data': encrypted_chunk.decode(),  # Convert bytes to string for serialization
-                    'metadata': metadata
+                     'data': base64.b64encode(encrypted_chunk).decode(),  # Encode bytes to Base64
+                     'metadata': metadata
                 }
 
                 # Serialize data with metadata to JSON and encode as bytes
@@ -84,16 +105,86 @@ class KMS:
                     encrypted_chunk_file.write(encrypted_data_bytes)
 
                 chunk_index += 1
+        return encrypted_chunks_folder
 
+    def encrypt_file_with_aes_gcm(self, file_path):
+        """
+        Encrypts a file using the AES-GCM algorithm.
+        """
+        CHUNK_SIZE = 1024 * 1024  # 1MB chunk size (adjust as needed)
+        filename = os.path.basename(file_path)
+        encrypted_chunks_folder = 'static/encrypted_chunks'  # Folder to store encrypted chunks
+        if not os.path.exists(encrypted_chunks_folder):
+            os.makedirs(encrypted_chunks_folder)
+
+        with open(file_path, 'rb') as file:
+            chunk_index = 0
+            while True:
+                chunk = file.read(CHUNK_SIZE)
+                if not chunk:
+                    break
+
+                # Generate a unique DEK for each chunk
+                dek = self.request_key()
+
+                # Generate KEK and encrypt DEK
+                kek = self.request_key()
+                kek_cipher_suite = Fernet(kek)
+                encrypted_dek = kek_cipher_suite.encrypt(dek)
+                 # Store encrypted dEK for later decryption
+                self.storage[filename] = {'encrypted_kek': encrypted_dek}
+
+                # Generate CMK and encrypt KEK
+                cmk = self.request_key()
+                cmk_cipher_suite = Fernet(cmk)
+                encrypted_kek = cmk_cipher_suite.encrypt(kek)
+                 # Store encrypted KEK for later decryption
+                self.storage[filename] = {'encrypted_kek': encrypted_kek}
+
+                # Derive encryption key and nonce from DEK
+                encryption_key = dek[:32]  # 32 bytes for AES-256
+                nonce = dek[32:]  # Remaining bytes for nonce
+                
+                # Create AES-GCM cipher
+                cipher = Cipher(algorithms.AES(encryption_key), modes.GCM(nonce), backend=default_backend())
+                encryptor = cipher.encryptor()
+                
+
+                # Create metadata
+                metadata = {
+                    'filename': filename,
+                    'chunk_index': chunk_index,
+                    'algorithm': 'AES-GCM',
+                    'key_id': hashlib.sha256(dek).hexdigest()
+                }
+
+                 # Encrypt the chunk
+                encrypted_chunk = encryptor.update(chunk) + encryptor.finalize()
+
+                # Create a dictionary containing the encrypted chunk data and metadata
+                encrypted_data_with_metadata = {
+                     'data': base64.b64encode(encrypted_chunk).decode(),  # Encode bytes to Base64
+                     'metadata': metadata
+                }
+
+                # Serialize data with metadata to JSON and encode as bytes
+                encrypted_data_json = json.dumps(encrypted_data_with_metadata)
+                encrypted_data_bytes = encrypted_data_json.encode()
+
+                # Write the encrypted data to a separate file
+                encrypted_chunk_filename = f'{filename}_chunk_{chunk_index}.encrypted'
+                encrypted_chunk_path = os.path.join(encrypted_chunks_folder, encrypted_chunk_filename)
+                with open(encrypted_chunk_path, 'wb') as encrypted_chunk_file:
+                    encrypted_chunk_file.write(encrypted_data_bytes)
+
+                chunk_index += 1
         return encrypted_chunks_folder
 
 
     def decrypt_file(self, file_path):
         """
-        Decrypts a file using the Data Encryption Key (DEK) retrieved using the filename and decrypts the DEK using the KEK.
+        Decrypts a file using the appropriate encryption algorithm determined from metadata.
         """
-        filename = os.path.basename(file_path)
-
         with open(file_path, 'rb') as file:
             # Read metadata length
             metadata_length = len(self.request_key())
@@ -105,42 +196,138 @@ class KMS:
             except UnicodeDecodeError:
                 print("Unable to decode metadata. The file may not be a valid encrypted file.")
                 return
-
-            # Get encrypted DEK from metadata
-            encrypted_dek = metadata.get('encrypted_dek')
-
-            # Retrieve CMK and encrypted KEK from storage based on filename
-            storage_data = self.storage.get(filename)
-            if not storage_data:
-                print("No stored keys found for the file.")
+            
+            # Verify metadata integrity
+            if not self.verify_metadata_integrity(metadata):
+                print("Metadata integrity verification failed. File may have been tampered with.")
                 return
 
-            encrypted_kek = storage_data.get('encrypted_kek')
-            cmk = storage_data.get('cmk')
+            # Determine encryption algorithm from metadata
+            algorithm = metadata.get('algorithm')
+            if algorithm == 'Fernet':
+                self.decrypt_file_with_fernet(file, metadata)
+            elif algorithm == 'AES-GCM':
+                self.decrypt_file_with_aes_gcm(file, metadata)
+            else:
+                print("Unsupported encryption algorithm.")
+                return
 
-            # Decrypt KEK using CMK
-            cmk_cipher_suite = Fernet(cmk)
-            kek = cmk_cipher_suite.decrypt(encrypted_kek.encode())
+    def decrypt_file_with_fernet(self, file, metadata, file_path):
+        """
+        Decrypts a file encrypted using the Fernet algorithm.
+        """
+       # Get encrypted DEK from metadata
+        encrypted_dek = metadata.get('encrypted_dek')
 
-            # Decrypt DEK using KEK
-            kek_cipher_suite = Fernet(kek)
-            dek = kek_cipher_suite.decrypt(encrypted_dek.encode())
+        # Retrieve CMK and encrypted KEK from storage based on filename
+        storage_data = self.storage.get(filename)
+        if not storage_data:
+            print("No stored keys found for the file.")
+            return
+        encrypted_kek = storage_data.get('encrypted_kek')
+        cmk = storage_data.get('cmk')
 
-            # Create Fernet object with decrypted DEK
-            fernet = Fernet(dek)
+        # Decrypt KEK using CMK
+        cmk_cipher_suite = Fernet(cmk)
+        kek = cmk_cipher_suite.decrypt(encrypted_kek.encode())
 
-            # Read the rest of the file (encrypted data)
-            encrypted_data = file.read()
+        # Decrypt DEK using KEK
+        kek_cipher_suite = Fernet(kek)
+        dek = kek_cipher_suite.decrypt(encrypted_dek.encode())
 
-            # Decrypt the data
-            decrypted_data = fernet.decrypt(encrypted_data)
+        # Create Fernet object with DEK
+        fernet = Fernet(dek)
 
-            # Write decrypted data to a new file
-            decrypted_file_path = file_path.replace('.encrypted', '')
-            with open(decrypted_file_path, 'wb') as decrypted_file:
-                decrypted_file.write(decrypted_data)
+        # Decrypt each chunk
+        decrypted_data = b""
+        for chunk_index in range(metadata['chunk_index'] + 1):
+            encrypted_data = self.read_next_encrypted_chunk(file, chunk_index)
+            decrypted_chunk = fernet.decrypt(encrypted_data)
+            decrypted_data += decrypted_chunk
 
-        return decrypted_file_path
+        # Write decrypted data to a new file
+        decrypted_file_path = file_path.replace('.encrypted', '')
+        with open(decrypted_file_path, 'wb') as decrypted_file:
+            decrypted_file.write(decrypted_data)
+
+    def decrypt_file_with_aes_gcm(self, file, metadata, file_path):
+        """
+        Decrypts a file encrypted using the AES-GCM algorithm.
+        """
+        # Get encrypted DEK from metadata
+        encrypted_dek = metadata.get('encrypted_dek')
+
+        # Retrieve CMK and encrypted KEK from storage based on filename
+        storage_data = self.storage.get(filename)
+        if not storage_data:
+            print("No stored keys found for the file.")
+            return
+        encrypted_kek = storage_data.get('encrypted_kek')
+        cmk = storage_data.get('cmk')
+
+        # Decrypt KEK using CMK
+        cmk_cipher_suite = Fernet(cmk)
+        kek = cmk_cipher_suite.decrypt(encrypted_kek.encode())
+
+        # Decrypt DEK using KEK
+        kek_cipher_suite = Fernet(kek)
+        dek = kek_cipher_suite.decrypt(encrypted_dek.encode())
+
+        # Derive encryption key and nonce from DEK
+        encryption_key = dek[:32]  # 32 bytes for AES-256
+        nonce = dek[32:]  # Remaining bytes for nonce
+
+        # Create AES-GCM cipher
+        cipher = Cipher(algorithms.AES(encryption_key), modes.GCM(nonce), backend=default_backend())
+        decryptor = cipher.decryptor()
+
+        # Decrypt each chunk
+        decrypted_data = b""
+        for chunk_index in range(metadata['chunk_index'] + 1):
+            encrypted_data = self.read_next_encrypted_chunk(file, chunk_index)
+            decrypted_chunk = decryptor.update(encrypted_data) + decryptor.finalize()
+            decrypted_data += decrypted_chunk
+
+        # Write decrypted data to a new file
+        decrypted_file_path = file_path.replace('.encrypted', '')
+        with open(decrypted_file_path, 'wb') as decrypted_file:
+            decrypted_file.write(decrypted_data)
+    
+    def verify_metadata_integrity(self, metadata):
+        """
+        Verify integrity of file metadata.
+        """
+        # Calculate hash of metadata without 'hash' field
+        metadata_without_hash = metadata.copy()
+        metadata_without_hash.pop('hash', None)
+        metadata_hash = hashlib.sha256(json.dumps(metadata_without_hash).encode()).hexdigest()
+
+        # Compare calculated hash with provided hash in metadata
+        if 'hash' in metadata and metadata['hash'] == metadata_hash:
+            return True
+        else:
+            return False
+    
+    def rotate_master_key(self):
+        """
+        Rotate the Master Key (MK) by generating a new one.
+        """
+        old_mk = app.config['CMK']
+        new_mk = Fernet.generate_key()  
+        app.config['CMK'] = new_mk
+        self.reencrypt_deks(old_mk, new_mk)  
+
+    def reencrypt_deks(self, old_mk, new_mk):
+        """
+        Re-encrypts all Data Encryption Keys (DEKs) using the new Master Key (MK).
+        """
+        for filename, data in self.storage.items():
+            encrypted_dek = data.get('encrypted_dek')
+            if encrypted_dek:
+                dek = Fernet(old_mk).decrypt(encrypted_dek.encode())
+                new_encrypted_dek = Fernet(new_mk).encrypt(dek)
+                data['encrypted_dek'] = new_encrypted_dek.decode()
+
 
     def delete_dek(self, filename):
         """
@@ -161,6 +348,7 @@ kms = KMS()
 
 class UploadFileForm(FlaskForm):
     file = FileField("File", validators=[InputRequired()])
+    encryption_algorithm = SelectField("Encryption Algorithm", choices=[('fernet', 'Fernet'), ('aes-gcm', 'AES-GCM')])
     submit = SubmitField("Upload File")
 
 
@@ -175,8 +363,9 @@ def home():
         filename = secure_filename(file.filename)
         file_path = os.path.join(app.config['UPLOAD_FOLDER'], filename)
         file.save(file_path)
-        kms.encrypt_file(file_path)
-        
+        encryption_algorithm = form.encryption_algorithm.data
+        kms.encrypt_file(file_path, encryption_algorithm)
+
         return "File has been uploaded and encrypted. If you need to download file, updat windows"
     return render_template('index.html', form=form, files=original_files)
 

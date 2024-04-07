@@ -13,6 +13,10 @@
     <form method='POST' enctype='multipart/form-data' action="{{ url_for('home') }}">
         {{ form.hidden_tag() }}
         <input type="file" name="file">
+        <select name="encryption_algorithm">
+            <option value="fernet">Fernet</option>
+            <option value="aes-gcm">AES-GCM</option>
+        </select>
         <input type="submit" value="Upload File">
     </form>
 
