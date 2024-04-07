@@ -1,17 +1,19 @@
-import base64
-from fileinput import filename
 from flask import Flask, render_template, request, send_from_directory
-from flask_wtf import FlaskForm
+from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+from cryptography.hazmat.backends import default_backend
+from wtforms.validators import InputRequired
 from wtforms import FileField, SubmitField
 from werkzeug.utils import secure_filename
 from cryptography.fernet import Fernet
-import os
-import json
-from wtforms.validators import InputRequired
-import hashlib
-from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
-from cryptography.hazmat.backends import default_backend
+from flask_wtf import FlaskForm
 from wtforms import SelectField
+from fileinput import filename
+import base64
+import secrets
+import hashlib
+import json
+import os
+
 
 app = Flask(__name__)
 app.config['SECRET_KEY'] = 'supersecretkey'
@@ -88,10 +90,14 @@ class KMS:
                  # Encrypt the chunk with the DEK
                 encrypted_chunk = fernet.encrypt(chunk)
 
+                # Calculate authentication tag based on encrypted data and metadata
+                authentication_tag = hashlib.sha256(encrypted_chunk + json.dumps(metadata).encode()).hexdigest()
+
                 # Create a dictionary containing the encrypted chunk data and metadata
                 encrypted_data_with_metadata = {
                      'data': base64.b64encode(encrypted_chunk).decode(),  # Encode bytes to Base64
-                     'metadata': metadata
+                     'metadata': metadata,
+                     'authentication_tag': authentication_tag
                 }
 
                 # Serialize data with metadata to JSON and encode as bytes
@@ -111,7 +117,7 @@ class KMS:
         """
         Encrypts a file using the AES-GCM algorithm.
         """
-        CHUNK_SIZE = 1024 * 1024  # 1MB chunk size (adjust as needed)
+        CHUNK_SIZE = 1024 * 1024  
         filename = os.path.basename(file_path)
         encrypted_chunks_folder = 'static/encrypted_chunks'  # Folder to store encrypted chunks
         if not os.path.exists(encrypted_chunks_folder):
@@ -125,46 +131,35 @@ class KMS:
                     break
 
                 # Generate a unique DEK for each chunk
-                dek = self.request_key()
+                dek = secrets.token_bytes(64)  
 
-                # Generate KEK and encrypt DEK
-                kek = self.request_key()
-                kek_cipher_suite = Fernet(kek)
-                encrypted_dek = kek_cipher_suite.encrypt(dek)
-                 # Store encrypted dEK for later decryption
-                self.storage[filename] = {'encrypted_kek': encrypted_dek}
+                # Generate a unique nonce
+                nonce = secrets.token_bytes(12)  
 
-                # Generate CMK and encrypt KEK
-                cmk = self.request_key()
-                cmk_cipher_suite = Fernet(cmk)
-                encrypted_kek = cmk_cipher_suite.encrypt(kek)
-                 # Store encrypted KEK for later decryption
-                self.storage[filename] = {'encrypted_kek': encrypted_kek}
-
-                # Derive encryption key and nonce from DEK
-                encryption_key = dek[:32]  # 32 bytes for AES-256
-                nonce = dek[32:]  # Remaining bytes for nonce
-                
                 # Create AES-GCM cipher
-                cipher = Cipher(algorithms.AES(encryption_key), modes.GCM(nonce), backend=default_backend())
+                cipher = Cipher(algorithms.AES(dek[:32]), modes.GCM(nonce), backend=default_backend())
                 encryptor = cipher.encryptor()
-                
+
+                # Encrypt the chunk
+                encrypted_chunk = encryptor.update(chunk) + encryptor.finalize()
+
+                # Get the authentication tag
+                authentication_tag = encryptor.tag
 
                 # Create metadata
                 metadata = {
                     'filename': filename,
                     'chunk_index': chunk_index,
                     'algorithm': 'AES-GCM',
-                    'key_id': hashlib.sha256(dek).hexdigest()
+                    'key_id': hashlib.sha256(dek).hexdigest(),
+                    'nonce': base64.b64encode(nonce).decode(),
+                    'authentication_tag': base64.b64encode(authentication_tag).decode()
                 }
-
-                 # Encrypt the chunk
-                encrypted_chunk = encryptor.update(chunk) + encryptor.finalize()
 
                 # Create a dictionary containing the encrypted chunk data and metadata
                 encrypted_data_with_metadata = {
-                     'data': base64.b64encode(encrypted_chunk).decode(),  # Encode bytes to Base64
-                     'metadata': metadata
+                    'data': base64.b64encode(encrypted_chunk).decode(),  # Encode bytes to Base64
+                    'metadata': metadata
                 }
 
                 # Serialize data with metadata to JSON and encode as bytes
@@ -178,6 +173,10 @@ class KMS:
                     encrypted_chunk_file.write(encrypted_data_bytes)
 
                 chunk_index += 1
+
+                # Store DEK for later decryption
+                self.storage[filename] = {'dek': dek}
+
         return encrypted_chunks_folder
 
 
@@ -245,6 +244,18 @@ class KMS:
             decrypted_chunk = fernet.decrypt(encrypted_data)
             decrypted_data += decrypted_chunk
 
+        # Calculate authentication tag from decrypted data and metadata
+        calculated_tag = hash.Hash(hash.SHA256(), backend=default_backend())
+        calculated_tag.update(decrypted_data)
+        calculated_tag.update(json.dumps(metadata).encode())
+        authentication_tag = calculated_tag.finalize()
+
+        # Compare authentication tag with original tag
+        original_tag = base64.b64decode(metadata['authentication_tag'].encode())
+        if authentication_tag != original_tag:
+            print("Authentication tag verification failed. Data may have been tampered with.")
+            return    
+
         # Write decrypted data to a new file
         decrypted_file_path = file_path.replace('.encrypted', '')
         with open(decrypted_file_path, 'wb') as decrypted_file:
@@ -254,28 +265,12 @@ class KMS:
         """
         Decrypts a file encrypted using the AES-GCM algorithm.
         """
-        # Get encrypted DEK from metadata
-        encrypted_dek = metadata.get('encrypted_dek')
-
-        # Retrieve CMK and encrypted KEK from storage based on filename
-        storage_data = self.storage.get(filename)
-        if not storage_data:
-            print("No stored keys found for the file.")
-            return
-        encrypted_kek = storage_data.get('encrypted_kek')
-        cmk = storage_data.get('cmk')
-
-        # Decrypt KEK using CMK
-        cmk_cipher_suite = Fernet(cmk)
-        kek = cmk_cipher_suite.decrypt(encrypted_kek.encode())
-
-        # Decrypt DEK using KEK
-        kek_cipher_suite = Fernet(kek)
-        dek = kek_cipher_suite.decrypt(encrypted_dek.encode())
+        # Get DEK from metadata
+        dek = self.get_dek_from_metadata(metadata)
 
         # Derive encryption key and nonce from DEK
-        encryption_key = dek[:32]  # 32 bytes for AES-256
-        nonce = dek[32:]  # Remaining bytes for nonce
+        encryption_key = dek[:32]  
+        nonce = dek[32:]  
 
         # Create AES-GCM cipher
         cipher = Cipher(algorithms.AES(encryption_key), modes.GCM(nonce), backend=default_backend())
@@ -287,6 +282,15 @@ class KMS:
             encrypted_data = self.read_next_encrypted_chunk(file, chunk_index)
             decrypted_chunk = decryptor.update(encrypted_data) + decryptor.finalize()
             decrypted_data += decrypted_chunk
+
+        # Calculate authentication tag from decrypted data and metadata
+        calculated_tag = decryptor.tag
+        original_tag = base64.b64decode(metadata['authentication_tag'].encode())
+
+        # Compare authentication tag with original tag
+        if calculated_tag != original_tag:
+            print("Authentication tag verification failed. Data may have been tampered with.")
+            return    
 
         # Write decrypted data to a new file
         decrypted_file_path = file_path.replace('.encrypted', '')
