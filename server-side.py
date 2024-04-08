@@ -14,6 +14,8 @@ import secrets
 import hashlib
 import json
 import os
+from flask import Flask, redirect, render_template, request, session, url_for
+from werkzeug.security import generate_password_hash, check_password_hash
 
 
 app = Flask(__name__)
@@ -385,36 +387,96 @@ class UploadFileForm(FlaskForm):
     submit = SubmitField("Upload File")
 
 
+app.config['SHARED_FOLDER'] = 'static/Shared folder'
 
+def get_shared_folder():
+    shared_folder = app.config['SHARED_FOLDER']
+    if not os.path.exists(shared_folder):
+        os.makedirs(shared_folder)
+    return shared_folder
+
+def get_user_file_folder(username):
+    user_folder = os.path.join(app.config['UPLOAD_FOLDER'], username)
+    if not os.path.exists(user_folder):
+        os.makedirs(user_folder)
+    return user_folder
+
+
+from flask import flash
 
 @app.route('/', methods=['GET', 'POST'])
 def home():
+    if 'logged_in' not in session:
+        return redirect(url_for('login'))
+
     form = UploadFileForm()
-    original_files = [file for file in os.listdir(app.config['UPLOAD_FOLDER']) if not file.endswith('.encrypted')]
+    message = None  # Initialize message variable
     if form.validate_on_submit():
         file = form.file.data
         filename = secure_filename(file.filename)
-        file_path = os.path.join(app.config['UPLOAD_FOLDER'], filename)
+        if 'share_file' in request.form:
+            destination_folder = get_shared_folder()
+        else:
+            destination_folder = get_user_file_folder(session['username'])
+        file_path = os.path.join(destination_folder, filename)
         file.save(file_path)
         encryption_algorithm = form.encryption_algorithm.data
         kms.encrypt_file(file_path, encryption_algorithm)
 
-        return "File has been uploaded and encrypted. If you need to download file, updat windows"
-    return render_template('index.html', form=form, files=original_files)
+        message = "File has been uploaded and encrypted."  # Set success message
+        flash(message, 'success')  # Flash the success message
+
+        return redirect(url_for('home'))
+
+    shared_files_folder = get_shared_folder()
+    shared_files = [file for file in os.listdir(shared_files_folder) if not file.endswith('.encrypted')]
+    return render_template('index.html', form=form,  shared_files=shared_files, username=session['username'], message=message)
+
+
+
 
 
 
 @app.route('/download/<filename>')
 def download(filename):
-    file_path = os.path.join(app.config['UPLOAD_FOLDER'], filename)
-    kms.decrypt_file(file_path)
-    return send_from_directory(app.config['UPLOAD_FOLDER'], filename, as_attachment=True)
+    user_folder = get_user_file_folder(session['username'])
+    shared_folder = get_shared_folder()
+
+    # Check if the file exists in the user's folder
+    user_file_path = os.path.join(user_folder, filename)
+    if os.path.exists(user_file_path):
+        kms.decrypt_file(user_file_path)
+        return send_from_directory(user_folder, filename, as_attachment=True)
+
+    # Check if the file exists in the shared folder
+    shared_file_path = os.path.join(shared_folder, filename)
+    if os.path.exists(shared_file_path):
+        # No need to decrypt shared files
+        return send_from_directory(shared_folder, filename, as_attachment=True)
+
+    # If the file is not found in either location, return an error message
+    return "File not found."
+
+
 
 @app.route('/list')
 def list_files():
-    #original_files = [file for file in os.listdir(app.config['UPLOAD_FOLDER']) if not file.endswith('.encrypted')]
-    original_files = os.listdir(app.config['UPLOAD_FOLDER'])
-    return render_template('list.html', files=original_files)
+    user_files_folder = get_user_file_folder(session['username'])
+    shared_folder = get_shared_folder()
+
+    # Fetch files from the user's folder
+    user_files = [file for file in os.listdir(user_files_folder) if not file.endswith('.encrypted')]
+    
+    # Fetch files from the shared folder
+    shared_files = [file for file in os.listdir(shared_folder) if not file.endswith('.encrypted')]
+
+    # Combine user files and shared files, ensuring uniqueness
+    all_files = set(user_files + shared_files)
+
+    return json.dumps(list(all_files))
+
+
+
 
 @app.route('/share/<filename>', methods=['POST'])
 def share(filename):
@@ -435,6 +497,81 @@ def unshare(filename):
         else:
             return "File does not exist or cannot be unshared."
     return redirect(url_for('list_files'))
+
+
+@app.route('/dashboard')
+def dashboard():
+    if 'logged_in' in session:
+        return render_template('dashboard.html')
+    return redirect(url_for('login'))
+
+
+# Load user data from JSON file
+def load_users():
+    try:
+        with open('users.json', 'r') as f:
+            return json.load(f)
+    except FileNotFoundError:
+        return {}
+
+# Save user data to JSON file
+def save_users(users):
+    with open('users.json', 'w') as f:
+        json.dump(users, f)
+
+# User database
+users = load_users()
+
+@app.route('/register', methods=['GET', 'POST'])
+def register():
+    if request.method == 'POST':
+        username = request.form['username']
+        password = request.form['password']
+        if username in users:
+            return "User already exists! Please choose a different username."
+        users[username] = generate_password_hash(password)
+        with open('users.json', 'r+') as f:
+            data = json.load(f)
+            data[username] = users[username]
+            f.seek(0)
+            json.dump(data, f)
+            f.truncate()
+        return redirect(url_for('login'))
+    return render_template('register.html')
+
+
+
+@app.route('/login', methods=['GET', 'POST'])
+def login():
+    if request.method == 'POST':
+        username = request.form['username']
+        password = request.form['password']
+        
+        # Check if the username exists
+        if username in users:
+            # Check if the password matches
+            if check_password_hash(users[username], password):
+                # Set session variables for logged-in user
+                session['logged_in'] = True
+                session['username'] = username
+                return redirect(url_for('home'))
+        
+        # If username or password is incorrect, show error message
+        return render_template('login.html', error="Invalid username or password. Please try again.")
+
+    # If it's a GET request, render the login form
+    return render_template('login.html', error=None)
+
+@app.route('/logout', methods=['GET', 'POST'])
+def logout():
+    if request.method == 'POST':
+        # Perform logout functionality
+        session.pop('logged_in', None)
+        session.pop('username', None)
+        return redirect(url_for('login'))
+    # If it's a GET request, just redirect to the login page
+    return redirect(url_for('login'))
+
 
 if __name__ == '__main__':
     app.run(debug=True)

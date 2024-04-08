@@ -8,73 +8,110 @@
     <link rel="stylesheet" href="{{ url_for('static', filename='css/index.css') }}">
 </head>
 <body>
-    <h1>File Uploads</h1>
+    <header>
+        <h1>File Uploads</h1>
+        <!-- Display the username if it exists in the session -->
+        {% if username %}
+            <p class="welcome-message" >Welcome, {{ username }}!</p>
+        {% endif %}
+        <form  class"logout-button" action="{{ url_for('logout') }}" method="post">
+            <button  type="submit">Logout</button>
+        </form>
+    </header>   
 
-    <form method='POST' enctype='multipart/form-data' action="{{ url_for('home') }}">
-        {{ form.hidden_tag() }}
-        <input type="file" name="file">
-        <select name="encryption_algorithm">
-            <option value="fernet">Fernet</option>
-            <option value="aes-gcm">AES-GCM</option>
-        </select>
-        <input type="submit" value="Upload File">
-    </form>
-
-    <h2>List of Files</h2>
-    <table>
-        <thead>
-            <tr>
-                <th>Filename</th>
-                <th>Action</th>
-                <th>Share</th>
-                <th>Unshare</th>
-            </tr>
-        </thead>
-        <tbody id="file-list">
-            <!-- File list will be dynamically populated here -->
-            {% for file in files %}
-            <tr>
-                <td>{{ file }}</td>
-                <td><a href="{{ url_for('download', filename=file) }}" class="download-btn">Download</a></td>
-                <td>
-                    <form action="{{ url_for('share', filename=file) }}" method="post" style="display: inline;">
-                        <input type="text" name="user" placeholder="User to share with">
-                        <button type="submit">Share</button>
-                    </form>
-                </td>
-                <td>
-                    <form action="{{ url_for('unshare', filename=file) }}" method="post" style="display: inline;">
-                        <input type="text" name="user" placeholder="User to unshare">
-                        <button type="submit">Unshare</button>
-                    </form>
-                </td>
-            </tr>
-            {% endfor %}
-        </tbody>
-    </table>
+    <main>
+        <h2>Upload File</h2>
+        <form method='POST' enctype='multipart/form-data' action="{{ url_for('home') }}" class="upload-form">
+            {{ form.hidden_tag() }}
+            <div class="form-group">
+                <label for="file-upload">Select File:</label>
+                <input type="file" name="file" id="file-upload">
+            </div>
+            <div class="form-group">
+                <label for="encryption">Encryption Algorithm:</label>
+                <select name="encryption_algorithm" id="encryption">
+                    <option value="fernet">Fernet</option>
+                    <option value="aes-gcm">AES-GCM</option>
+                </select>
+            </div>
+            <button type="submit" name="upload_file">Upload File</button>
+            <button type="submit" name="share_file">Upload to Shared Folder</button>
+        </form>
+        
+        {% with messages = get_flashed_messages(with_categories=true) %}
+        {% if messages %}
+          {% for category, message in messages %}
+            <div class="alert alert-{{ category }}">
+              {{ message }}
+            </div>
+          {% endfor %}
+        {% endif %}
+      {% endwith %}
+      
+        <h2>List of Files</h2>
+        <table>
+            <thead>
+                <tr>
+                    <th>Filename</th>
+                    <th>Action</th>
+                </tr>
+            </thead>
+            <tbody id="file-list">
+                <!-- File list will be dynamically populated here -->
+                {% for file in files %}
+                <tr>
+                    <td>{{ file }}</td>
+                    <td><a href="{{ url_for('download', filename=file) }}" class="download-btn">Download</a></td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </main>
 
     <script>
         // Fetch the list of files from the server
         fetch('/list')
-            .then(response => response.json())
-            .then(files => {
-                const fileList = document.getElementById('file-list');
-                files.forEach(file => {
-                    const row = document.createElement('tr');
-                    const fileNameCell = document.createElement('td');
-                    fileNameCell.textContent = file;
-                    row.appendChild(fileNameCell);
-                    const actionCell = document.createElement('td');
-                    const downloadLink = document.createElement('a');
-                    downloadLink.href = `/download/${file}`;
-                    downloadLink.textContent = 'Download';
-                    downloadLink.className = 'download-btn';
-                    actionCell.appendChild(downloadLink);
-                    row.appendChild(actionCell);
-                    fileList.appendChild(row);
-                });
-            })
-            .catch(error => console.error('Error fetching file list:', error));
+        .then(response => response.json())
+        .then(files => {
+            const fileList = document.getElementById('file-list');
+            const userFiles = new Set();
+            const sharedFiles = new Set();
+    
+            files.forEach(file => {
+                // Check if the file is from the user's folder or shared folder
+                if (file.startsWith('shared_')) {
+                    sharedFiles.add(file);
+                } else {
+                    userFiles.add(file);
+                }
+            });
+    
+            // Function to create a table row for a file
+            const createRow = (filename, folder) => {
+                const row = document.createElement('tr');
+                const fileNameCell = document.createElement('td');
+                fileNameCell.textContent = filename;
+                row.appendChild(fileNameCell);
+    
+                const actionCell = document.createElement('td');
+                const downloadLink = document.createElement('a');
+                downloadLink.href = `/download/${filename}`;
+                downloadLink.textContent = 'Download';
+                downloadLink.className = 'download-btn';
+                actionCell.appendChild(downloadLink);
+                row.appendChild(actionCell);
+    
+                fileList.appendChild(row);
+            };
+    
+            // Create table rows for user files
+            userFiles.forEach(file => createRow(file, 'user'));
+    
+            // Create table rows for shared files
+            sharedFiles.forEach(file => createRow(file, 'shared'));
+        })
+        .catch(error => console.error('Error fetching file list:', error));
     </script>
+    
 </body>
 </html>
