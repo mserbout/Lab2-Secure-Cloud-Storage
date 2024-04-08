@@ -2,41 +2,110 @@ from cryptography.fernet import Fernet
 import os
 import secrets
 
-
-
 KEY_ROTATION_INTERVAL = 2 # Rotate keys every 10 uploads/downloads
 MASTER_KEY_FILE = "master_key.key"
 PREVIOUS_MASTER_KEY_FILE = "previous_master_key.key"
 PASSWORD = "12345"
-# MK="CvTnMTqI01MFsmiieCqIZ71HOwe4eWmQYiUFfVH8RMQ="
 
 class ModeSelector:
+    @staticmethod
     def select_mode():
         while True:
             print("Choose mode:")
-            print("1. Clien t")
-            print("2. server")
+            print("1. Client")
+            print("2. Server")
             mode_choice = input("Enter your choice (1 or 2): ")
             if mode_choice == '1':
-                return client.client_cli()
+                return 'client'
             elif mode_choice == '2':
                 return 'server'
             else:
                 print("Invalid choice! Please enter 1 for server mode or 2 for client mode.")
 
-
-
-
 class Client:
     def __init__(self, server, kms):
         self.server = server
         self.kms = kms
-        self.key_hierarchy = {}  
+        self.key_hierarchy = {}
         self.upload_count = 0
         self.current_master_key = None
+        self.username = None
+        self.password = None
+        
+        self.authenticated = False
+        self.users = {}
+
+
+    
+    def register(self):
+        self.username = input("Enter your desired username: ")
+        if self.username in self.users:
+            print("Username already exists. Please choose a different username.")
+            return
+        self.password = input("Enter your desired password: ")
+        self.users[self.username] = self.password  # Store username and password
+        self.server.register(self.username, self.password)
+        print("Registration successful.")
+
+
+    def login(self):
+        self.username = input("Enter your username: ")
+        self.password = input("Enter your password: ")
+        # Perform authentication logic here
+        # For demonstration, I'm using a hardcoded dictionary
+        # if self.server.authenticate(self.username, self.password):
+        #     self.authenticated = True
+        #     return True
+        # else:
+        #     print("Authentication failed.")
+        #     return False
+        if self.username in self.users and self.users[self.username] == self.password:
+            self.authenticated = True
+            print("Success")
+
+            return True
+        else:
+            print("Authentication failed.")
+            return False
+    
+
+    # def authenticate_client(self):
+    #     while not self.authenticated:
+    #         if not self.login():
+    #             choice = input("Do you want to try again? (yes/no): ")
+    #             if choice.lower() != "yes":
+    #                 return False
+    #     return True
+    # def authenticate_client(self):
+    #     while not self.authenticated:
+    #         choice = input("Do you want to register (r) or login (l)? ")
+    #         if choice.lower() == 'r':
+    #             self.register()
+    #         elif choice.lower() == 'l':
+    #             if not self.login():
+    #                 print("Login failed.")
+    #         else:
+    #             print("Invalid choice.")
+    def authenticate_client(self):
+        while not self.authenticated:
+            choice = input("Do you want to register (r) or login (l)? ")
+            if choice.lower() == 'r':
+                self.register()
+            elif choice.lower() == 'l':
+                if self.login():  # Changed condition here
+                    print("Login successful.")  # Added success message
+                else:
+                    print("Login failed.")
+            else:
+                print("Invalid choice.")
 
 
     def upload(self, filename):
+        if not self.authenticated:
+            print("Client is not authenticated. Please authenticate first.")
+            return
+
+        # Rest of the upload method logic remains unchanged
         with open(filename, 'rb') as f:
             data = f.read()
         
@@ -97,8 +166,12 @@ class Client:
         else:
                 print("INCORRECT PASSWORD")
 
-
     def download(self, filename, output_filename):
+        if not self.authenticated:
+            print("Client is not authenticated. Please authenticate first.")
+            return
+
+        # Rest of the download method logic remains unchanged
         encrypted_data_with_metadata = self.server.retrieve(filename)
 
         if encrypted_data_with_metadata:
@@ -146,6 +219,7 @@ class Client:
         else:
             print("File not found!")
 
+    # Rest of the Client class remains unchanged
     def list_files(self):
         return self.server.list_files()
 
@@ -181,10 +255,24 @@ class Client:
 
         self.current_master_key = new_master_key
 
+
 class Server:
     def __init__(self):
         self.storage = {}
+        # Hardcoded dictionary for demonstration. Replace with a secure mechanism.
+        self.users = {"user1": "password1"}
+    def register(self, username, password):
+        if username in self.users:
+            print("Username already exists. Please choose a different username.")
+        else:
+            self.users[username] = password
+            print("Registration successful.")
 
+    def authenticate(self, username, password):
+        # Simple authentication logic. Replace with secure authentication mechanism.
+        return username in self.users and self.users[username] == password
+
+    # Rest of the Server class remains unchanged
     def store(self, filename,encrypted_data_with_metadata,encrypted_kek,MK):
 
         self.storage[filename] = {
@@ -219,7 +307,6 @@ class Server:
             else:
                 print("Invalid choice!")
 
-
 class KMS:
     def __init__(self):
         self.keys = {}
@@ -229,23 +316,21 @@ class KMS:
             self.keys[id] = Fernet.generate_key()
         return self.keys[id]
 
-
     def secure_delete_key(self, key_id):
         if key_id in self.keys:
             key_length = len(self.keys[key_id])
             self.keys[key_id] = secrets.token_bytes(key_length)
 
-
-
-
 kms = KMS()
 server = Server()
 client = Client(server, kms)
 
-ModeSelector.select_mode()
+mode = ModeSelector.select_mode()
 
-print("Client CLI:")
-client.client_cli()
-
-print("\nServer CLI:")
-server.server_cli()
+if mode == 'client':
+    client.authenticate_client()
+    print("Client CLI:")
+    client.client_cli()
+    
+elif mode == 'server':
+    server.server_cli()
