@@ -1,18 +1,30 @@
-
-
-
 <!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Uploaded Files</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/index.css') }}">
 </head>
 <body>
     <h1>Uploaded Files</h1>
     <ul>
         {% for file in files %}
-            <li><a href="{{ url_for('download', filename=file) }}">{{ file }}</a></li>
+            <li>
+                <a href="{{ url_for('download', filename=file) }}">{{ file }}</a>
+                
+                <!-- Form for sharing file -->
+                <form action="{{ url_for('share', filename=file) }}" method="post" style="display: inline;">
+                    <input type="text" name="user" placeholder="User to share with">
+                    <button type="submit" class="button">Share</button>
+                </form>
+                
+                <!-- Form for unsharing file -->
+                <form action="{{ url_for('unshare', filename=file) }}" method="post" style="display: inline;">
+                    <input type="text" name="user" placeholder="User to unshare">
+                    <button type="submit" class="button">Unshare</button>
+                </form>
+            </li>
         {% endfor %}
     </ul>
 </body>

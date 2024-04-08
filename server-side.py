@@ -1,4 +1,5 @@
-from flask import Flask, render_template, request, send_from_directory
+import shutil
+from flask import Flask, redirect, render_template, request, send_from_directory, url_for
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from cryptography.hazmat.backends import default_backend
 from wtforms.validators import InputRequired
@@ -20,7 +21,7 @@ app.config['SECRET_KEY'] = 'supersecretkey'
 app.config['UPLOAD_FOLDER'] = 'static/files'
 app.config['CMK'] = Fernet.generate_key()  # Customer Master Key
 app.config['DOWNLOAD_FOLDER'] = 'static/download'
-
+app.config['SHARED_FOLDER'] = 'static/Shared folder'
 
 class KMS:
     def __init__(self):
@@ -348,6 +349,34 @@ class KMS:
             return False
 
 
+    def grant_access(self, filename, user):
+        """
+        Grant access to a user for a specific file.
+        """
+        shared_folder_path = app.config['SHARED_FOLDER']
+        user_shared_folder = os.path.join(shared_folder_path, user)
+        if not os.path.exists(user_shared_folder):
+            os.makedirs(user_shared_folder)
+        src_file = os.path.join(app.config['UPLOAD_FOLDER'], filename)
+        dest_file = os.path.join(user_shared_folder, filename)
+        if os.path.exists(src_file):
+            shutil.copy(src_file, dest_file)
+            return True
+        else:
+            return False
+
+    def revoke_access(self, filename, user):
+        """
+        Revoke access to a file from a user.
+        """
+        user_shared_folder = os.path.join(app.config['SHARED_FOLDER'], user)
+        file_path = os.path.join(user_shared_folder, filename)
+        if os.path.exists(file_path):
+            os.remove(file_path)
+            return True
+        else:
+            return False
+
 kms = KMS()
 
 class UploadFileForm(FlaskForm):
@@ -387,7 +416,25 @@ def list_files():
     original_files = os.listdir(app.config['UPLOAD_FOLDER'])
     return render_template('list.html', files=original_files)
 
+@app.route('/share/<filename>', methods=['POST'])
+def share(filename):
+    if request.method == 'POST':
+        user = request.form['user']
+        if kms.grant_access(filename, user):
+            return redirect(url_for('list_files'))
+        else:
+            return "File does not exist or cannot be shared."
+    return redirect(url_for('list_files'))
 
+@app.route('/unshare/<filename>', methods=['POST'])
+def unshare(filename):
+    if request.method == 'POST':
+        user = request.form['user']
+        if kms.revoke_access(filename, user):
+            return redirect(url_for('list_files'))
+        else:
+            return "File does not exist or cannot be unshared."
+    return redirect(url_for('list_files'))
 
 if __name__ == '__main__':
     app.run(debug=True)
