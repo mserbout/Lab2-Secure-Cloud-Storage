@@ -8,4 +8,4 @@ To run this project, follow these steps:
 2. Execute the `py run.py` file.
 
 
-Ensure you have registered before try log in !!
+Ensure you  registered before try log in !!
